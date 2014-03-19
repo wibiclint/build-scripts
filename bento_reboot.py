@@ -17,116 +17,322 @@ import shutil
 import subprocess
 import sys
 
+import bento_classpath
+
 myname = os.path.split(sys.argv[0])[-1]
 description = \
   "This script will re-install your Bento Box and symlink some JAR files. " + \
   "It assumes the kiji-bento-...-release.tar.gz file is in the pwd. " + \
-  "If you wish to symlink JAR files, checkouts for those projects should also be in the pwd " + \
+  "If you wish to symlink JAR files, checkouts for those targets should also be in the pwd " + \
   "and they should already be built."
+
+# Regex to get the bento version, assumes for now that each part of the version is only one digit
+# (makes getting the most-recent version easy - just sort lexographically).
+p_bento = re.compile(r'kiji-bento-(?P<name>\w+)-(?P<version>\d\.\d\.\d)-release\.tar\.gz')
 
 def run(cmd):
   return subprocess.check_output(cmd, shell=True)
 
-def create_parser():
-  """ Returns a parser for the script """
+class BentoRebooter(object):
 
-  parser = argparse.ArgumentParser(
-      description=description,
-      formatter_class=argparse.RawTextHelpFormatter)
+  def create_parser(self):
+    """ Returns a parser for the script """
 
-  parser.add_argument(
-      '-v',
-      '--verbose',
-      action='store_true',
-      default=False,
-      help='Verbose mode (turn on logging.info)')
+    parser = argparse.ArgumentParser(
+        description=description,
+        formatter_class=argparse.RawTextHelpFormatter)
 
-  parser.add_argument(
-      '-d',
-      '--debug',
-      action='store_true',
-      default=False,
-      help='Debug (turn on logging.debug)')
+    parser.add_argument(
+        '-v',
+        '--verbose',
+        action='store_true',
+        default=False,
+        help='Verbose mode (turn on logging.info)')
 
-  parser.add_argument(
-      '-b',
-      '--bento-version',
-      type=str,
-      default=None,
-      help='Bento version to install (e.g., "1.4.3") [latest tgz in pwd]')
+    parser.add_argument(
+        '-d',
+        '--debug',
+        action='store_true',
+        default=False,
+        help='Debug (turn on logging.debug)')
 
-  parser.add_argument(
-      '-l',
-      '--link-modules',
-      type=str,
-      default=None,
-      help='CSV of modules whose JAR files should get symlinked to Bento lib/*.jar locations (e.g., "model-repository,modeling") [None].')
+    parser.add_argument(
+        '-b',
+        '--bento-version',
+        type=str,
+        default=None,
+        help='Bento version to install (e.g., "1.4.3") [latest tgz in pwd]')
 
-  return parser
+    parser.add_argument(
+        '-l',
+        '--link-modules',
+        type=str,
+        default=None,
+        help='CSV of modules whose JAR files should get symlinked to Bento lib/*.jar locations (e.g., "model-repository,modeling") [None].')
 
-def _find_bento_tgz(bento_version_or_none):
-  """ Return a pointer to the tgz file to use to install the bento box.  Use the most-recent version
-  in the pwd, unless the user specfied otherwise. """
+    return parser
 
-  # Get all of the tgz files in the pwd.
-  all_bento_tgz = [f for f in os.listdir(os.getcwd()) if f.endswith('.tar.gz') and f.startswith('kiji-bento')]
-  assert len(all_bento_tgz) > 0, "Could not find any bento tgz files!"
+  def find_bento_tgz(self, bento_version_or_none):
+    """
+    Return a pointer to the tgz file to use to install the bento box.  Use the most-recent version in
+    the pwd, unless the user specfied otherwise.
+    """
 
-  # For now we are assuming that none of the "versions" ever get to more than one digit - make it
-  # easy to get the most recent version, just by doing a reverse sort.
+    # Get all of the tgz files in the pwd.
+    all_bento_tgz = [f for f in os.listdir(os.getcwd()) if f.endswith('.tar.gz') and f.startswith('kiji-bento')]
+    assert len(all_bento_tgz) > 0, "Could not find any bento tgz files!"
 
-  if (bento_version_or_none == None):
-    return sorted(all_bento_tgz)[-1]
+    # For now we are assuming that none of the "versions" ever get to more than one digit - make it
+    # easy to get the most recent version, just by doing a reverse sort.
 
-  # Regex to get the bento version
-  p_bento = re.compile(r'kiji-bento-(?P<name>\w+)-(?P<version>\d\.\d\.\d)-release\.tar\.gz')
-
-  for bento in all_bento_tgz:
-    m_bento = p_bento.match(bento)
-    assert m_bento, "Could not regex match bento " + bento
-    if m_bento.group('version') == bento_version_or_none:
-      return bento
-    logging.debug(m_bento.group('version'))
-
-  assert False, "Could not find a bento tgz file with version " + bento_version_or_none
+    if (bento_version_or_none == None):
+      return sorted(all_bento_tgz)[-1]
 
 
-# ------------------------------------------------------------------------------
-# Parse command-line arguments
+    for bento in all_bento_tgz:
+      m_bento = p_bento.match(bento)
+      assert m_bento, "Could not regex match bento " + bento
+      if m_bento.group('version') == bento_version_or_none:
+        return bento
+      logging.debug(m_bento.group('version'))
 
-args = create_parser().parse_args()
+    assert False, "Could not find a bento tgz file with version " + bento_version_or_none
 
-if args.verbose:
-  logging.basicConfig(level=logging.INFO)
+  def untar_bento(self, bento_dir, bento_tgz):
+    """ Untar the bento box. """
+    if (os.path.isdir(bento_dir)):
+      shutil.rmtree(bento_dir)
 
-if args.debug:
-  logging.basicConfig(level=logging.DEBUG)
+    assert not os.path.exists(bento_dir)
+
+    cmd = 'tar -zxvf %s' % bento_tgz
+    run(cmd)
+
+    assert os.path.exists(bento_dir)
+
+  def get_locally_built_jar_for_target(self, kiji_target):
+    """
+    Return the JAR created by maven for this Kiji target.  Some of the Kiji projects have submodules
+    that may contain the JAR files.
+    """
+
+    # If you are building locally, the the JAR should look like:
+    # <kiji target>-x.y.z-SNAPSHOT.jar
+    p_jar = re.compile(kiji_target + r'-(?P<version>\d+\.\d+\.\d+)-SNAPSHOT.jar')
+
+    # Hopefully we'll get only one of these!
+    matching_jars = set()
+
+    # TODO: Make this more efficient?
+    for (dirpath, _, filenames) in os.walk(os.getcwd()):
+      # Only count JARs found within target/ (not within target/something/lib, for example).
+      assert os.path.split(dirpath)[1] != ''
+      if os.path.split(dirpath)[1] != 'target':
+        continue
+
+      for fname in filenames:
+        m_jar = p_jar.match(fname)
+        if m_jar:
+          matching_jars.add(os.path.join(dirpath, fname))
+
+    logging.info("Matching JARs for Kiji target " + kiji_target + ":")
+    for jar in sorted(matching_jars):
+      logging.info("\t" + jar)
+
+    assert len(matching_jars) != 0, "Did not find any JARs built by Maven for %s!" % kiji_target
+    assert len(matching_jars) == 1, \
+      "Found multiple potential matches for JARs built by Maven for target %s!" % kiji_target
+
+    return list(matching_jars)[0]
+
+  def sym_link_target_jars(self, bento_dir, link_modules):
+    """ Link all of the modules specified here to the appropriate <bento location>/lib/*.jar file. """
+
+    def _get_bento_jars_for_target(kiji_target):
+      """
+      Go into the bento lib directory and find the JAR file for this target (some of these, like
+      kiji-mapreduce, are tricky and will need hard-coding).
+      """
+
+      all_jars = set()
+
+      for (dirpath, _, filenames) in os.walk(bento_dir):
+
+        for fname in filenames:
+          if fname.startswith(kiji_target) and fname.endswith('.jar'):
+            all_jars.add(os.path.join(dirpath, fname))
+
+      logging.info("Bento Box JARs found for Kiji target " + kiji_target + ":")
+      for bento_jar in all_jars:
+        logging.info('\t' + bento_jar)
+
+      return all_jars
 
 
-# ------------------------------------------------------------------------------
-# Find the appropriate bento file.
-bento_tgz = _find_bento_tgz(args.bento_version)
+    def _backup_bento_jar(bento_jar):
+      """
+      Back up this Bento Box JAR to a .bak file.  If the current JAR file is a sym link, remove that
+      link (since we are about to relink).
+      """
+      backup_jar = bento_jar.replace('.jar', '.bak')
 
-logging.info("Using bento tgz file " + bento_tgz)
+      # If the current JAR is a symlink, then it should already have been backed up.  Just delete the
+      # symlink and return.
+      if os.path.islink(bento_jar):
+        assert os.path.isfile(backup_jar)
+        os.remove(bento_jar)
+        logging.info("Bento JAR %s is already backed up.  Remove symlink." % bento_jar)
+        return
+
+      logging.info("Backing up JAR file %s to %s..." % (bento_jar, backup_jar))
+      os.rename(bento_jar, backup_jar)
+      assert os.path.isfile(backup_jar)
+
+    def _symlink_local_jar_to_bento(local_jar, bento_jar):
+      assert not os.path.isfile(bento_jar), \
+          "Bento JAR %s should not exist - it should have already been moved to *.bak" % bento_jar
+      logging.info("Creating symlink %s pointing to %s..." % (bento_jar, local_jar))
+      os.symlink(local_jar, bento_jar)
 
 
+    for module in link_modules:
+      kiji_target = 'kiji-' + module
 
-if False:
-  bento_dir = 'kiji-bento-dashi'
-  bento_tar = 'kiji-bento-dashi-1.4.0-release.tar.gz'
+      # Get the JAR file location in the target's target/ directory
+      local_jar = self.get_locally_built_jar_for_target(kiji_target)
 
-  # Make sure that we can find the bento directory
-  assert(os.path.isdir(bento_dir))
-  assert(os.path.isfile(bento_tar))
+      # Get all of the JAR files for this target in the bento box.
+      # There can be more than one JAR for each target (bento redundancies).
+      bento_jar_list = _get_bento_jars_for_target(kiji_target)
 
-  shutil.rmtree(bento_dir)
+      # Back up the bento file and symlink the new file!
+      for bento_jar in bento_jar_list:
+        _backup_bento_jar(bento_jar)
+        _symlink_local_jar_to_bento(local_jar, bento_jar)
 
-  cmd = 'tar -zxvf %s' % bento_tar
+  def get_dependency_jars(self, link_modules):
+    """
+    For every one of the modules that we are linking, add more stuff to the classpath.
 
-  os.system(cmd)
+    """
 
-  assert(os.path.isdir(bento_dir))
+    def _get_dependencies_for_building_target(local_jar):
+      """
+      Use the Bento classpath script to get the dependencies for building this JAR.  The build
+      directory should just be the root directory of this JAR file.
+      """
+      assert os.path.isfile(local_jar)
+      assert local_jar.endswith('.jar')
 
-  cmd = 'source %s/bin/kiji-env.sh; bento start' % bento_dir
-  os.system(cmd)
+      target_dir = os.path.dirname(local_jar)
+      assert os.path.isdir(target_dir)
+      assert target_dir.endswith('target')
 
+      dirs = target_dir.split('/')
+      assert dirs[-1] == 'target'
+      build_dir = '/'.join(dirs[:-1])
+      assert os.path.isdir(build_dir)
+
+      logging.info("Getting dependency JARs from %s..." % build_dir)
+
+      # Cache the current PWD, switch directories for the call to this script, then switch back.
+      cwd = os.getcwd()
+      os.chdir(build_dir)
+
+      # Run the script that puts all of the dependencies into a file.
+      bentocp = bento_classpath.BentoClasspath()
+      bentocp.go('-f'.split())
+
+      os.chdir(cwd)
+
+      logging.info("...Done")
+
+      return bentocp.dependencies
+
+    # Capture all of the JARs in the classpaths for all of these projects in a big set.  If the
+    # ordering of these JARs matters, then we may need to do something smarter here (and we are
+    # probably dead).
+    dependency_jars = []
+
+    for module in link_modules:
+      kiji_target = 'kiji-' + module
+
+      # Get the JAR file location in the target's target/ directory
+      local_jar = self.get_locally_built_jar_for_target(kiji_target)
+
+      #dependency_jars.update(_get_dependencies_for_building_target(local_jar))
+      dependency_jars.extend(_get_dependencies_for_building_target(local_jar))
+
+    logging.info("Found %s unique dependencies." % len(dependency_jars))
+
+    return dependency_jars
+
+  def write_file_that_sets_classpath(self, dependencies, var_name, ofile):
+    """
+    Output a file that the user can source to set up the entire maven build classpath for all of the
+    locally-built JARs.
+    """
+    #deps_to_write = [x for x in dependencies if x.find('scala') == -1]
+    deps_to_write = dependencies
+
+    myfile = open(ofile, 'w')
+    myfile.write('export %s=%s\n' % (var_name, ':'.join(deps_to_write)))
+
+    for dep in deps_to_write:
+      myfile.write("# %s\n" % dep)
+
+    myfile.close()
+
+  def go(self, cmd_line_args):
+    # ----------------------------------------------------------------------------------------------
+    # Parse command-line arguments
+    args = self.create_parser().parse_args(cmd_line_args)
+
+    if args.verbose:
+      logging.basicConfig(level=logging.INFO)
+
+    if args.debug:
+      logging.basicConfig(level=logging.DEBUG)
+
+    if args.link_modules == None:
+      link_modules = []
+    else:
+      link_modules = args.link_modules.split(',')
+
+    # ----------------------------------------------------------------------------------------------
+    # Find the appropriate bento file.
+    bento_tgz = self.find_bento_tgz(args.bento_version)
+    logging.info("Using bento tgz file " + bento_tgz)
+
+    m_bento = p_bento.match(bento_tgz)
+    assert m_bento
+    bento_dir = 'kiji-bento-' + m_bento.group('name')
+
+    # ----------------------------------------------------------------------------------------------
+    # Untar the bento box, possibly deleting the previous install.
+    self.untar_bento(bento_dir, bento_tgz)
+
+    # ----------------------------------------------------------------------------------------------
+    # Optionally sym link some JAR files
+    self.sym_link_target_jars(bento_dir, link_modules)
+
+    # ----------------------------------------------------------------------------------------------
+    # Create a classpath variable with the classpaths for *all* of the different modules that we
+    # symlinked.
+    dependency_jars = self.get_dependency_jars(link_modules)
+    var_name = 'EXTRA_CLASSPATH'
+    src_file = 'SOURCE_ME.sh'
+    self.write_file_that_sets_classpath(dependency_jars, var_name, src_file)
+    assert os.path.isfile(src_file)
+
+    msg = \
+      "Source the file '%s' to set the env var '%s' to contain all JARs needed to build the " + \
+      "locally-built Kiji projects you specified.  Note that if those locally-build " + \
+      "have vastly different dependencies than your bento box (e.g., different scala " + \
+      "versions), then sourcing '%s' may hose everything."
+    print msg % (src_file, var_name, src_file)
+
+
+if __name__ == "__main__":
+  foo = BentoRebooter()
+  foo.go(sys.argv[1:])
