@@ -24,123 +24,130 @@ description = """This script will set up your classpath appropriately."""
 def run(cmd):
   return subprocess.check_output(cmd, shell=True)
 
-def create_parser():
-  """ Returns a parser for the script """
+class BentoClasspath(object):
 
-  parser = argparse.ArgumentParser(
-      description=description,
-      formatter_class=argparse.RawTextHelpFormatter)
+  def create_parser(self):
+    """ Returns a parser for the script """
 
-  parser.add_argument(
-      '-v',
-      '--verbose',
-      action='store_true',
-      default=False,
-      help='Verbose mode (turn on logging.info)')
+    parser = argparse.ArgumentParser(
+        description=description,
+        formatter_class=argparse.RawTextHelpFormatter)
 
-  parser.add_argument(
-      '-f',
-      '--blow-away-existing-lib-dir',
-      action='store_true',
-      default=False,
-      help='Blow away an existing lib directory')
+    parser.add_argument(
+        '-v',
+        '--verbose',
+        action='store_true',
+        default=False,
+        help='Verbose mode (turn on logging.info)')
 
-  parser.add_argument(
-      '--output-file',
-      type=str,
-      default='SOURCE_ME.sh',
-      help='Output file that will set up classpath for you')
+    parser.add_argument(
+        '-f',
+        '--blow-away-existing-lib-dir',
+        action='store_true',
+        default=False,
+        help='Blow away an existing lib directory')
 
-  parser.add_argument(
-      '--env-var',
-      type=str,
-      default='KIJI_CLASSPATH',
-      help='Name of environment variable to set [KIJI_CLASSPATH]')
+    parser.add_argument(
+        '--output-file',
+        type=str,
+        default='SOURCE_ME.sh',
+        help='Output file that will set up classpath for you')
 
-  return parser
+    parser.add_argument(
+        '--env-var',
+        type=str,
+        default='KIJI_CLASSPATH',
+        help='Name of environment variable to set [KIJI_CLASSPATH]')
 
-# ------------------------------------------------------------------------------
-# Parse command-line arguments
-
-args = create_parser().parse_args()
-
-# Output file location
-output_file = args.output_file
-
-# Name of environment variable to set
-env_var = args.env_var
-
-b_blow_away = args.blow_away_existing_lib_dir
-
-lib_dir_name = 'mylib'
-
-if args.verbose:
-  logging.basicConfig(level=logging.INFO)
+    return parser
 
 
-def get_classpath_from_maven():
-  """ Run maven to gather the classpath.  Return as a list of strings. """
-  maven_output = run("mvn dependency:build-classpath")
+  def get_classpath_from_maven(self):
+    """ Run maven to gather the classpath.  Return as a list of strings. """
+    maven_output = run("mvn dependency:build-classpath")
 
-  dependencies = None
+    dependencies = None
 
-  b_expect_on_next_line = False
+    b_expect_on_next_line = False
 
-  for line in maven_output.splitlines():
-    if line.startswith('[INFO]'):
-      print(line)
+    for line in maven_output.splitlines():
+      if line.startswith('[INFO]'):
+        print(line)
 
-    if line == '[INFO] Dependencies classpath:':
-      # Should be the next line
-      assert dependencies == None
-      b_expect_on_next_line = True
+      if line == '[INFO] Dependencies classpath:':
+        # Should be the next line
+        assert dependencies == None
+        b_expect_on_next_line = True
 
-    elif b_expect_on_next_line:
-      assert dependencies == None
-      assert not line.startswith('[INFO]')
-      dependencies = line.split(':')
-      print("Found %d dependencies" % len(dependencies))
-      b_expect_on_next_line = False
+      elif b_expect_on_next_line:
+        assert dependencies == None
+        assert not line.startswith('[INFO]')
+        dependencies = line.split(':')
+        print("Found %d dependencies" % len(dependencies))
+        b_expect_on_next_line = False
 
-  assert dependencies != None
-  return dependencies
+    assert dependencies != None
+    return dependencies
 
-def remove_kiji_dependencies(dependencies):
-  """ Remove any of the Kiji stuff to avoid CLASSPATH hell... """
-  return [dep for dep in dependencies if dep.find('kiji') == -1]
+  def remove_kiji_dependencies(self, dependencies):
+    """ Remove any of the Kiji stuff to avoid CLASSPATH hell... """
+    return [dep for dep in dependencies if dep.find('kiji') == -1]
 
-def write_classpath_file(ofile, var_name, dependencies):
-  """ Write out all of the dependencies to a classpath file """
-  myfile = open(ofile, 'w')
-  myfile.write('export %s=%s\n' % (var_name, ':'.join(dependencies)))
+  def write_classpath_file(self, ofile, var_name, dependencies):
+    """ Write out all of the dependencies to a classpath file """
+    myfile = open(ofile, 'w')
+    myfile.write('export %s=%s\n' % (var_name, ':'.join(dependencies)))
 
-  for dep in dependencies:
-    myfile.write("# %s\n" % dep)
+    for dep in dependencies:
+      myfile.write("# %s\n" % dep)
 
-  myfile.close()
+    myfile.close()
 
-def create_kiji_mr_lib_directory(dependencies):
-  """ Create a "lib" directory with symlinks to all of the dependencies needed on the cluster. """
-  if os.path.exists(lib_dir_name) and not b_blow_away:
-    assert False, \
-        "Do not want to overwrite existing directory '%s'.  Use -f option to overwrite." % lib_dir_name
+  def create_kiji_mr_lib_directory(self, lib_dir_name, dependencies):
+    """ Create a "lib" directory with symlinks to all of the dependencies needed on the cluster. """
+    if os.path.exists(lib_dir_name) and not self.b_blow_away:
+      assert False, \
+          "Do not want to overwrite existing directory '%s'.  Use -f option to overwrite." % lib_dir_name
 
-  if os.path.exists(lib_dir_name):
-    shutil.rmtree(lib_dir_name)
+    if os.path.exists(lib_dir_name):
+      shutil.rmtree(lib_dir_name)
 
-  os.mkdir(lib_dir_name)
+    os.mkdir(lib_dir_name)
 
-  for dep in dependencies:
-    jar_name = os.path.basename(dep)
+    for dep in dependencies:
+      jar_name = os.path.basename(dep)
 
-    link = os.path.join(lib_dir_name, jar_name)
+      link = os.path.join(lib_dir_name, jar_name)
 
-    # Create a symlink!
-    os.symlink(dep, link)
+      # Create a symlink!
+      os.symlink(dep, link)
 
+  def go(self, cmd_line_args):
 
-dependencies = get_classpath_from_maven()
-dependencies_without_kiji = remove_kiji_dependencies(dependencies)
-write_classpath_file(output_file, env_var, dependencies_without_kiji)
-print("source '%s' to set up your KIJI_CLASSPATH." % output_file)
-create_kiji_mr_lib_directory(dependencies_without_kiji)
+    # ------------------------------------------------------------------------------
+    # Parse command-line arguments
+
+    args = self.create_parser().parse_args(cmd_line_args)
+
+    # Output file location
+    output_file = args.output_file
+
+    # Name of environment variable to set
+    env_var = args.env_var
+
+    self.b_blow_away = args.blow_away_existing_lib_dir
+
+    lib_dir_name = 'mylib'
+
+    if args.verbose:
+      logging.basicConfig(level=logging.INFO)
+
+    dependencies = self.get_classpath_from_maven()
+    dependencies_without_kiji = self.remove_kiji_dependencies(dependencies)
+    self.write_classpath_file(output_file, env_var, dependencies_without_kiji)
+    print("source '%s' to set up your KIJI_CLASSPATH." % output_file)
+    self.create_kiji_mr_lib_directory(lib_dir_name, dependencies_without_kiji)
+
+if __name__ == "__main__":
+  foo = BentoClasspath()
+  foo.go(sys.argv[1:])
