@@ -148,6 +148,8 @@ class BentoClasspath(object):
     print("source '%s' to set up your KIJI_CLASSPATH." % output_file)
     self.create_kiji_mr_lib_directory(lib_dir_name, dependencies_without_kiji)
 
+    self.dependencies = dependencies_without_kiji
+
 if __name__ == "__main__":
   foo = BentoClasspath()
   foo.go(sys.argv[1:])
