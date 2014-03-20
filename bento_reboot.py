@@ -35,12 +35,47 @@ def run(cmd):
 
 class BentoRebooter(object):
 
-  def create_parser(self):
+  # List of commands available to the user.
+  possible_actions = [
+      'help-actions',
+      'install-bento',
+      'link-jars',
+      'setup-classpath',
+  ]
+
+  actions_help = {
+      'install-bento':
+        "Will set up a bento box for you.  Assumes you are in a directory with a .tar.gz file "
+        "for the appropriate bento build.  If you don't specify a specific build, this script "
+        "will use the most-recent tar file in the current directory.  The scripts will rm -rf "
+        "your current bento directory, kill any stale java processes, and untar the .tar.gz file.",
+
+      'link-jars':
+        "Will create symlinks from locally-built JARs to the JARs in your Bento Box.  The "
+        "script will search your Bento Box's directory structure for all occurrences of JAR "
+        "files for the projects that you specify.",
+
+      'setup-classpath':
+        "Will use the mvn dependency:build-classpath command to get the Maven classpaths used for "
+        "building the collection of locally-built JARs that you indicate.  This can be useful if "
+        "you have added an external dependency for a new version of one of the Kiji projects that "
+        "was not present in the older version used in the Bento Box.  The command produces a bash "
+        "file that you can source to set an env var to contain the extra JARs.  Note that if one "
+        "the new versions of a Kiji project does something really different from the Bento Box "
+        "(e.g., uses a different version of Scala), then this will really hose you.",
+    }
+
+  def _create_parser(self):
     """ Returns a parser for the script """
 
     parser = argparse.ArgumentParser(
         description=description,
         formatter_class=argparse.RawTextHelpFormatter)
+
+    parser.add_argument(
+        "action",
+        nargs='*',
+        help="Action to take")
 
     parser.add_argument(
         '-v',
@@ -72,6 +107,63 @@ class BentoRebooter(object):
 
     return parser
 
+  def _parse_options(self, cmd_line_args):
+    # ----------------------------------------------------------------------------------------------
+    # Parse command-line arguments
+    args = self.create_parser().parse_args(cmd_line_args)
+
+    if args.verbose:
+      logging.basicConfig(level=logging.INFO)
+
+    if args.debug:
+      logging.basicConfig(level=logging.DEBUG)
+
+    if args.link_modules == None:
+      link_modules = []
+    else:
+      link_modules = args.link_modules.split(',')
+
+    self.actions = opts.action
+    for action in self.actions:
+      assert action in self.possible_actions
+
+    if 'help-actions' in self.actions: self._help_actions()
+
+    # ----------------------------------------------------------------------------------------------
+    # Kill any stale processes from the previous Bento Box.
+
+    # ----------------------------------------------------------------------------------------------
+    # Find the appropriate bento file.
+    bento_tgz = self.find_bento_tgz(args.bento_version)
+    logging.info("Using bento tgz file " + bento_tgz)
+
+    m_bento = p_bento.match(bento_tgz)
+    assert m_bento
+    bento_dir = 'kiji-bento-' + m_bento.group('name')
+
+    # ----------------------------------------------------------------------------------------------
+    # Untar the bento box, possibly deleting the previous install.
+    self.untar_bento(bento_dir, bento_tgz)
+
+    # ----------------------------------------------------------------------------------------------
+    # Optionally sym link some JAR files
+    self.sym_link_target_jars(bento_dir, link_modules)
+
+    # ----------------------------------------------------------------------------------------------
+    # Create a classpath variable with the classpaths for *all* of the different modules that we
+    # symlinked.
+    dependency_jars = self.get_dependency_jars(link_modules)
+    var_name = 'EXTRA_CLASSPATH'
+    src_file = 'SOURCE_ME.sh'
+    self.write_file_that_sets_classpath(dependency_jars, var_name, src_file)
+    assert os.path.isfile(src_file)
+
+    msg = \
+      "Source the file '%s' to set the env var '%s' to contain all JARs needed to build the " + \
+      "locally-built Kiji projects you specified.  Note that if those locally-build " + \
+      "have vastly different dependencies than your bento box (e.g., different scala " + \
+      "versions), then sourcing '%s' may hose everything."
+    print msg % (src_file, var_name, src_file)
   def find_bento_tgz(self, bento_version_or_none):
     """
     Return a pointer to the tgz file to use to install the bento box.  Use the most-recent version in
@@ -283,7 +375,30 @@ class BentoRebooter(object):
 
     myfile.close()
 
-  def go(self, cmd_line_args):
+  def _exit_if_bento_still_running(self):
+    jps_results = run('jps')
+    if jps_results.lower().find('minicluster') != -1 and not self.b_kill_bento:
+      assert False, "Please kill all bento-related jobs (run 'jps' to get a list)"
+
+    # Kill all of the bento processes
+    for line in jps_results.splitlines():
+      toks = line.split()
+      if len(toks) == 1: continue
+      assert len(toks) == 2, toks
+      (pid, job) = toks
+      if job == 'Jps': continue
+      cmd = "kill -9 " + pid
+      run(cmd)
+
+  def _help_actions(self):
+    """ Print detailed information about how the different actions work """
+    actions_str = ""
+    for (key,value) in self.actions_help.items():
+      actions_str += "command: %s\n%s\n\n" % (key, value)
+    print(actions_str)
+    sys.exit(0)
+
+  def _parse_options(self, cmd_line_args):
     # ----------------------------------------------------------------------------------------------
     # Parse command-line arguments
     args = self.create_parser().parse_args(cmd_line_args)
@@ -298,6 +413,15 @@ class BentoRebooter(object):
       link_modules = []
     else:
       link_modules = args.link_modules.split(',')
+
+    self.actions = opts.action
+    for action in self.actions:
+      assert action in self.possible_actions
+
+    if 'help-actions' in self.actions: self._help_actions()
+
+    # ----------------------------------------------------------------------------------------------
+    # Kill any stale processes from the previous Bento Box.
 
     # ----------------------------------------------------------------------------------------------
     # Find the appropriate bento file.
@@ -331,6 +455,10 @@ class BentoRebooter(object):
       "have vastly different dependencies than your bento box (e.g., different scala " + \
       "versions), then sourcing '%s' may hose everything."
     print msg % (src_file, var_name, src_file)
+
+  def go(self, cmd_line_args):
+    self._parse_options(cmd_line_args)
+    self._run_actions()
 
 
 if __name__ == "__main__":
