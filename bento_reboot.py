@@ -31,7 +31,15 @@ description = \
 p_bento = re.compile(r'kiji-bento-(?P<name>\w+)-(?P<version>\d\.\d\.\d)-release\.tar\.gz')
 
 def run(cmd):
-  return subprocess.check_output(cmd, shell=True)
+  result = ""
+  try:
+    result = subprocess.check_output(cmd, shell=True)
+  except subprocess.CalledProcessError as e:
+    sys.stderr.write("Error running command '%s'\n" % cmd)
+    sys.stderr.write("Exit code = %s\n" % e.returncode)
+    sys.stderr.write("Output = %s\n" % e.output)
+    raise e
+  return result
 
 class BentoRebooter(object):
 
@@ -41,7 +49,9 @@ class BentoRebooter(object):
       'help-actions',
       'install-bento',
       'link-jars',
-      'setup-classpath',
+      #'setup-classpath',
+      'run-bento',
+      #'run-scoring-server',
   ]
 
   actions_help = {
@@ -65,6 +75,13 @@ class BentoRebooter(object):
         "file that you can source to set an env var to contain the extra JARs.  Note that if one "
         "the new versions of a Kiji project does something really different from the Bento Box "
         "(e.g., uses a different version of Scala), then this will really hose you.",
+
+      'run-bento':
+        "Basically just calls 'bento start', after the other actions (e.g., linking JARs) have "
+        "happened.",
+
+      'run-scoring-server':
+        "Starts the scoring server, after starting the Bento Box.",
     }
 
   def __init__(self):
@@ -106,6 +123,13 @@ class BentoRebooter(object):
         help='Debug (turn on logging.debug)')
 
     parser.add_argument(
+        '-r',
+        '--root-dir',
+        type=str,
+        default=os.getcwd(),
+        help='Root directory (containing tgz for bento) [pwd]')
+
+    parser.add_argument(
         '--bento-version',
         type=str,
         default=None,
@@ -118,17 +142,24 @@ class BentoRebooter(object):
         default=None,
         help='CSV of modules whose JAR files should get symlinked to Bento lib/*.jar locations (e.g., "model-repository,modeling") [None].')
 
+    parser.add_argument(
+        '-c',
+        '--classpath',
+        type=str,
+        default=None,
+        help='Value to which to set KIJI_CLASSPATH when running the scoring server.')
+
     return parser
 
   def _help_actions(self):
     """ Print detailed information about how the different actions work """
     actions_str = ""
-    for (key,value) in self.actions_help.items():
-      actions_str += "command: %s\n%s\n\n" % (key, value)
+    for action in self.possible_actions:
+      actions_str += "command: %s\n%s\n\n" % (action, self.actions_help[action])
     print(actions_str)
     sys.exit(0)
 
-  def _get_bento_dir(self, bento_version):
+  def _get_bento_dir_name(self, bento_version):
     bento_tgz = self._find_bento_tgz(bento_version)
     m_bento = p_bento.match(bento_tgz)
     assert m_bento
@@ -155,6 +186,9 @@ class BentoRebooter(object):
 
     self._args_bento_version = args.bento_version
 
+    self._root_dir = args.root_dir
+    assert os.path.isdir(self._root_dir)
+
     self._actions = args.action
     for action in self._actions:
       assert action in self.possible_actions, \
@@ -163,8 +197,13 @@ class BentoRebooter(object):
     if 'help-actions' in self._actions: self._help_actions()
 
     # Figure out what directory to use for the bento box.
-    self._bento_dir = self._get_bento_dir(self._args_bento_version)
+    self._bento_dir = os.path.join(
+        self._root_dir,
+        self._get_bento_dir_name(self._args_bento_version)
+    )
     logging.info("Bento directory is " + self._bento_dir)
+
+    self._classpath = args.classpath if args.classpath != None else ''
 
 
   def get_dependency_jars(self):
@@ -245,6 +284,7 @@ class BentoRebooter(object):
   # Stuff for installing the Bento Box
 
   def _kill_stale_java_processes(self):
+    logging.info("Killing stale Java processes.")
     jps_results = run('jps')
 
     # Kill all of the bento processes
@@ -261,10 +301,11 @@ class BentoRebooter(object):
     """
     Return a pointer to the tgz file to use to install the bento box.  Use the most-recent version in
     the pwd, unless the user specfied otherwise.
+
     """
 
     # Get all of the tgz files in the pwd.
-    all_bento_tgz = [f for f in os.listdir(os.getcwd()) if f.endswith('.tar.gz') and f.startswith('kiji-bento')]
+    all_bento_tgz = [f for f in os.listdir(self._root_dir) if f.endswith('.tar.gz') and f.startswith('kiji-bento')]
     assert len(all_bento_tgz) > 0, "Could not find any bento tgz files!"
 
     # For now we are assuming that none of the "versions" ever get to more than one digit - make it
@@ -289,7 +330,7 @@ class BentoRebooter(object):
 
     assert not os.path.exists(self._bento_dir)
 
-    cmd = 'tar -zxvf %s' % bento_tgz
+    cmd = 'cd %s; tar -zxvf %s' % (self._root_dir, bento_tgz)
     run(cmd)
 
     assert os.path.exists(self._bento_dir)
@@ -325,7 +366,7 @@ class BentoRebooter(object):
     matching_jars = set()
 
     # TODO: Make this more efficient?
-    for (dirpath, _, filenames) in os.walk(os.getcwd()):
+    for (dirpath, _, filenames) in os.walk(self._root_dir):
       # Only count JARs found within target/ (not within target/something/lib, for example).
       assert os.path.split(dirpath)[1] != ''
       if os.path.split(dirpath)[1] != 'target':
@@ -430,7 +471,36 @@ class BentoRebooter(object):
       "locally-built Kiji projects you specified.  Note that if those locally-build " + \
       "have vastly different dependencies than your bento box (e.g., different scala " + \
       "versions), then sourcing '%s' may hose everything."
-    print msg % (src_file, var_name, src_file)
+    print(msg % (src_file, var_name, src_file))
+
+  def _do_action_run_bento(self):
+    """ Just call "bento start" """
+    logging.info("Attempting to start Bento Box...")
+    logging.info("(this may take a minute)")
+
+    # Source kiji-env.sh and start the bento box
+    cmd = 'cd %s; source bin/kiji-env.sh; bento start' % self._bento_dir
+    results = run(cmd)
+
+    # Make sure that it starts correctly
+    assert results.find('bento-cluster started') != -1, \
+        "Bento cluster appears not to have started correctly: %s" % results
+    logging.info("Started bento box...")
+
+  def _do_action_run_scoring_server(self):
+    """ Set up the classpath, run the scoring server, check that it started okay. """
+
+    scoring_server_dir = os.path.join(self.bento_dir, 'scoring-server')
+
+    # Source kiji-env.sh and start the bento box
+    cmd = 'cd %s; source ../bin/kiji-env.sh; bin/kiji-scoring-server' % scoring_server_dir
+    run(cmd)
+
+    # Make sure that it starts correctly
+    pid_file = os.path.join(scoring_server_dir, 'kiji-scoring-server.pid')
+    assert os.path.isfile(pid_file), \
+      "Kiji scoring server did not start correctly - no PID file found in %s" % pid_file
+    logging.info("Starting scoring server...")
 
   def _run_actions(self):
     if 'install-bento' in self._actions:
@@ -442,6 +512,12 @@ class BentoRebooter(object):
 
     if 'setup_classpath' in self._actions:
       self._do_action_link_classpath()
+
+    if 'run-bento' in self._actions:
+      self._do_action_run_bento()
+
+    if 'run-scoring-server' in self._actions:
+      self._do_action_run_scoring_server()
 
   def go(self, cmd_line_args):
     self._parse_options(cmd_line_args)
