@@ -43,6 +43,9 @@ class JarCopier(object):
       'unpack-bento',
       'copy-kiji-jars',
       'update-lib-jars',
+      'copy-cassandra',
+      'update-bento-shell-script',
+      'all',
   ]
 
   actions_help = {
@@ -63,6 +66,19 @@ class JarCopier(object):
         "Attempt to update the lib directory of the Bento Box with the versions of various JARs "
         "necessary for running the new versions of some projects (those indicated with the "
         "--link-modules flag).",
+
+      'copy-cassandra':
+        "Copy Cassandra directory from source indicated with --casandra-location' flag. "
+        "Cassandra source should already have any necessary edits to cassandra.yaml. "
+        "Cassandra source will go within the root directory of the bento dir, and will be run "
+        "from the 'cluster' directory within the bento box.",
+
+      'update-bento-shell-script':
+        "Update the shell script with all of the bento commands to also start cassandra.",
+
+      'all':
+        "Run all commands",
+
     }
 
   def __init__(self):
@@ -123,6 +139,12 @@ class JarCopier(object):
         default=None,
         help='CSV of modules whose JAR files should get symlinked to Bento lib/*.jar locations (e.g., "model-repository,modeling") [None].')
 
+    parser.add_argument(
+        '--cassandra-location',
+        type=str,
+        default=None,
+        help='Location of unpacked Cassandra download, ready to copy to Bento Box' + \
+            '(should have cassandra.yaml updated already)')
     return parser
 
   def _help_actions(self):
@@ -169,12 +191,20 @@ class JarCopier(object):
 
     if 'help-actions' in self._actions: self._help_actions()
 
+    if 'all' in self._actions:
+      self._actions = [myaction for myaction in self.possible_actions \
+          if not myaction in ['all', 'help-actions']]
+
     # Figure out what directory to use for the bento box.
     self._bento_dir = os.path.join(
         self._root_dir,
         self._get_bento_dir_name(self._args_bento_version)
     )
     logging.info("Bento directory is " + self._bento_dir)
+
+    self._cassandra_location = args.cassandra_location
+    if 'copy-cassandra' in self._actions:
+      assert os.path.isdir(self._cassandra_location)
 
 
 
@@ -568,6 +598,38 @@ class JarCopier(object):
       # TODO: Update added jars
       self._update_added_jars(jar, added_jars)
 
+  #-------------------------------------------------------------------------------------------------
+  # Code for copying Cassandra.
+  def _do_action_copy_cassandra(self):
+    assert os.path.isdir(self._cassandra_location)
+    shutil.copytree(self._cassandra_location, os.path.join(self._bento_dir, 'cassandra'))
+
+  #-------------------------------------------------------------------------------------------------
+  # Code for updating the Bento shell script.
+  def _do_action_update_bento_shell_script(self):
+    """ Edit the Bento shell script to include commands to run Cassandra. """
+    bento_shell_script = os.path.join(self._bento_dir, 'cluster', 'bin', 'bento')
+    assert os.path.isfile(bento_shell_script), bento_shell_script
+
+    # Figure out the line number after which to insert custom Cassandra code.
+    f_ = open(bento_shell_script)
+    txt = f_.read()
+    f_.close()
+
+    p_insert = re.compile(r'echo "Starting bento-cluster\.\.\."')
+    assert p_insert.search(txt)
+
+    replacement_txt = """
+  # Start Cassandra
+  echo "Starting cassandra..."
+  cd "${BENTO_CLUSTER_HOME}"
+  ../cassandra/bin/cassandra
+
+  echo "Starting bento-cluster..." """
+
+    f_ = open(bento_shell_script, 'w')
+    f_.write(p_insert.sub(replacement_txt, txt))
+    f_.close()
 
   def _run_actions(self):
     assert os.path.isdir(self._bento_dir)
@@ -580,6 +642,12 @@ class JarCopier(object):
 
     if 'update-lib-jars' in self._actions:
       self._do_action_update_lib_jars()
+
+    if 'copy-cassandra' in self._actions:
+      self._do_action_copy_cassandra()
+
+    if 'update-bento-shell-script' in self._actions:
+      self._do_action_update_bento_shell_script()
 
   def go(self, cmd_line_args):
     self._parse_options(cmd_line_args)
