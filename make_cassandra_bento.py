@@ -45,7 +45,22 @@ class JarCopier(object):
       'update-lib-jars',
       'copy-cassandra',
       'update-bento-shell-script',
+      'copy-phonebook',
+      'silence-logging',
+      'package-bento',
+      'make-local',
       'all',
+  ]
+
+  normal_actions = [
+      'unpack-bento',
+      'copy-kiji-jars',
+      'update-lib-jars',
+      'copy-cassandra',
+      'update-bento-shell-script',
+      'copy-phonebook',
+      'silence-logging',
+      'package-bento',
   ]
 
   actions_help = {
@@ -76,8 +91,20 @@ class JarCopier(object):
       'update-bento-shell-script':
         "Update the shell script with all of the bento commands to also start cassandra.",
 
+      'copy-phonebook':
+        "Copy updated Cassandra code for the phonebook example to cassandra-phonebook.",
+
+      'silence-logging':
+        'Turn off all "INFO" level logging',
+
+      'package-bento':
+        "Zip up the new cassandra bento box!",
+
       'all':
         "Run all commands",
+
+      'make-local':
+        "Run everything needed to run locally (everything except for the phonebook and zipping up)",
 
     }
 
@@ -145,6 +172,19 @@ class JarCopier(object):
         default=None,
         help='Location of unpacked Cassandra download, ready to copy to Bento Box' + \
             '(should have cassandra.yaml updated already)')
+
+    parser.add_argument(
+        '--new-bento-name',
+        type=str,
+        default='cassandra-bento',
+        help='Name of .tar.gz file for new Cassandra bento box [cassandra-bento].')
+
+    parser.add_argument(
+        '--phonebook-location',
+        type=str,
+        default='kiji-phonebook',
+        help='Location of phonebook tutorial, updated for C* [kiji-phonebook].')
+
     return parser
 
   def _help_actions(self):
@@ -192,8 +232,10 @@ class JarCopier(object):
     if 'help-actions' in self._actions: self._help_actions()
 
     if 'all' in self._actions:
-      self._actions = [myaction for myaction in self.possible_actions \
-          if not myaction in ['all', 'help-actions']]
+      self._actions = [myaction for myaction in self.normal_actions]
+    elif 'make-local' in self._actions:
+      self._actions = [myaction for myaction in self.normal_actions \
+          if not myaction in ['package-bento', 'copy-phonebook'] ]
 
     # Figure out what directory to use for the bento box.
     self._bento_dir = os.path.join(
@@ -205,6 +247,9 @@ class JarCopier(object):
     self._cassandra_location = args.cassandra_location
     if 'copy-cassandra' in self._actions:
       assert os.path.isdir(self._cassandra_location)
+
+    self._cassandra_bento_name = args.new_bento_name + ".tar.gz"
+    self._phonebook_location = args.phonebook_location
 
 
 
@@ -490,12 +535,13 @@ class JarCopier(object):
     logging.info("Found %s unique dependencies." % len(dependency_jars))
 
     return dependency_jars
+
   def _get_jar_file_name(self, jar_full_path):
     return os.path.basename(jar_full_path)
 
   def _get_jar_project_name(self, jar_full_path):
     """ Return the name without the version or ".jar" """
-    p_jar = re.compile(r'-\d+(\.\d+)+(-tests|\.Final|-\d+|\w|-GA|\.GA|\.CR2|-M\d+)?\.jar')
+    p_jar = re.compile(r'-\d+(\.\d+)+(-SNAPSHOT|-tests|\.Final|-\d+|\w|-GA|\.GA|\.CR2|-M\d+|\.cloudera\.2)?\.jar')
     jar_name = os.path.basename(jar_full_path)
     root_name = p_jar.sub('', jar_name)
 
@@ -518,6 +564,9 @@ class JarCopier(object):
     return { self._get_jar_project_name(jar) : jar for jar in all_jars }
 
   def _is_jar_to_definitely_skip(self, jar_full_path):
+    if jar_full_path.find('cassandra2') != -1:
+      return False
+
     if jar_full_path.find('kiji') != -1:
       return True
 
@@ -613,11 +662,12 @@ class JarCopier(object):
 
     # Figure out the line number after which to insert custom Cassandra code.
     f_ = open(bento_shell_script)
-    txt = f_.read()
+    script = f_.read()
     f_.close()
 
-    p_insert = re.compile(r'echo "Starting bento-cluster\.\.\."')
-    assert p_insert.search(txt)
+    # Substitute in the code to start Cassandra.
+    p_start = re.compile(r'echo "Starting bento-cluster\.\.\."')
+    assert p_start.search(script)
 
     replacement_txt = """
   # Start Cassandra
@@ -627,12 +677,82 @@ class JarCopier(object):
 
   echo "Starting bento-cluster..." """
 
+    script = p_start.sub(replacement_txt, script)
+
+    # Sub in the code to kill Cassandra.
+    str_stop = 'function kill_bento() {'
+
+    replacement_stop = """function kill_bento() {
+  # Get the cassandra pid
+  echo "Shutting down Cassandra..."
+  CPID=`jps | grep Cassandra | cut -f 1 -d ' '`
+  kill $CPID
+"""
+
+    script = script.replace(str_stop, replacement_stop)
+
     f_ = open(bento_shell_script, 'w')
-    f_.write(p_insert.sub(replacement_txt, txt))
+    f_.write(script)
     f_.close()
 
+  #-------------------------------------------------------------------------------------------------
+  # Code for packaging up the new Bento Box.
+  def _do_action_package_bento(self):
+    """ tar up the updated bento dir. """
+    target_dir = os.path.join(self._bento_dir, '..')
+    cmd = 'cd %s; tar -czvf %s %s' % (
+        target_dir,
+        self._cassandra_bento_name,
+        os.path.relpath(self._bento_dir, target_dir))
+    run(cmd)
+    assert os.path.isfile(self._cassandra_bento_name)
+    print "Your new bento box is here: %s" % self._cassandra_bento_name
+
+  #-------------------------------------------------------------------------------------------------
+  # Code for copying the phonebook tutorial.
+
+  def _copy_raw_phonebook(self):
+    self._phonebook_target_dir = os.path.join(self._bento_dir, 'examples', 'cassandra-phonebook')
+    assert not os.path.isdir(self._phonebook_target_dir)
+
+    # Copy the directory to the bento box.
+    shutil.copytree(self._phonebook_location, self._phonebook_target_dir)
+
+  def _create_phonebook_lib(self):
+    # Run mvn to generate the source.
+    cmd = 'cd %s; mvn clean package -DskipTests' % self._phonebook_target_dir
+    run(cmd)
+
+    tgt_jar = 'kiji-phonebook-1.1.5-SNAPSHOT.jar'
+    assert os.path.isfile(os.path.join(self._phonebook_target_dir, 'target', tgt_jar))
+
+    os.mkdir(os.path.join(self._phonebook_target_dir, 'lib'))
+    shutil.copy(
+        os.path.join(self._phonebook_target_dir, 'target', tgt_jar),
+        os.path.join(self._phonebook_target_dir, 'lib', tgt_jar)
+    )
+    cmd = 'cd %s; mvn clean' % self._phonebook_target_dir
+    run(cmd)
+
+  def _do_action_copy_phonebook(self):
+    """ Run mvn package, copy the JARs, then mvn clean, then copy. """
+    assert os.path.isdir(self._phonebook_location)
+    self._copy_raw_phonebook()
+    self._create_phonebook_lib()
+
+  def _do_action_silence_logging(self):
+    """ Turn off logging. """
+    log4j_file = os.path.join(self._bento_dir, 'conf', 'log4j.properties')
+    f = open(log4j_file)
+    logging_conf = f.read()
+    f.close()
+
+    logging_conf = logging_conf.replace('INFO', 'WARN')
+    f = open(log4j_file, 'w')
+    f.write(logging_conf)
+    f.close()
+
   def _run_actions(self):
-    assert os.path.isdir(self._bento_dir)
     if 'unpack-bento' in self._actions:
       self._do_action_install_bento()
     assert os.path.isdir(self._bento_dir)
@@ -648,6 +768,15 @@ class JarCopier(object):
 
     if 'update-bento-shell-script' in self._actions:
       self._do_action_update_bento_shell_script()
+
+    if 'copy-phonebook' in self._actions:
+      self._do_action_copy_phonebook()
+
+    if 'silence-logging' in self._actions:
+      self._do_action_silence_logging()
+
+    if 'package-bento' in self._actions:
+      self._do_action_package_bento()
 
   def go(self, cmd_line_args):
     self._parse_options(cmd_line_args)
